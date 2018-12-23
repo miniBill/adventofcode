@@ -1,5 +1,5 @@
 import Control.Monad (ap, liftM)
-import Data.List (group, sort)
+import Data.List (group, groupBy, sort, sortBy)
 import Data.Maybe (fromMaybe)
 import Text.Read (readMaybe)
 
@@ -59,10 +59,10 @@ instance Monad SimpleParser where
       (x', s') <- x s
       runParser (f x') s'
 
-parseLine :: SimpleParser (Int, Int, Int, Int)
+parseLine :: SimpleParser (Int, Int, Int, Int, Int)
 parseLine = do
   literal "#"
-  _ <- number
+  claim <- number
   literal " @ "
   l <- number
   literal ","
@@ -71,9 +71,9 @@ parseLine = do
   w <- number
   literal "x"
   h <- number
-  return (l, t, w, h)
+  return (claim, l, t, w, h)
 
-(#) :: a -> (a -> b) -> b
+--(#) :: a -> (a -> b) -> b
 a # b = b a
 
 enumerate :: (Num a, Enum a) => a -> a -> a -> a -> [(a, a)]
@@ -82,12 +82,28 @@ enumerate l t w h = do
   x <- [l .. l + w - 1]
   return (x, y)
 
+findHole [] = Nothing
+findHole [x] = Nothing
+findHole (x:y:zs)
+  | y /= x + 1 = Just $ x + 1
+  | otherwise = findHole (y : zs)
+
 main :: IO ()
 main =
   let points raw = do
         ls <- lines raw
-        let (l, t, w, h) = fromMaybe (0, 0, 0, 0) $ evalParser parseLine ls
-        enumerate l t w h
+        let (claim, l, t, w, h) =
+              fromMaybe (0, 0, 0, 0, 0) $ evalParser parseLine ls
+        (x, y) <- enumerate l t w h
+        return (claim, x, y)
    in do raw <- readFile "input.txt"
-         raw # points # sort # group # map (\g -> (head g, length g)) #
-           filter (\(_, l) -> l > 1) #length# print
+         raw # points #
+           sortBy (\(_, x, y) (_, x', y') -> compare (x, y) (x', y')) #
+           groupBy (\(_, x, y) (_, x', y') -> (x, y) == (x', y')) #
+           filter (\g -> length g > 1) #
+           concatMap (map (\(c, _, _) -> c)) #
+           sort #
+           group #
+           map head #
+           findHole #
+           print
