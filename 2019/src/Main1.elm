@@ -9,7 +9,7 @@ import Html
 
 
 main =
-    FileProgram.fileMain innerView
+    FileProgram.fileMain_ innerView
 
 
 innerView file =

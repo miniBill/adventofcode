@@ -9,7 +9,7 @@ import Html
 
 
 main =
-    FileProgram.fileMain innerView
+    FileProgram.fileMain_ innerView
 
 
 innerView file =
@@ -23,11 +23,11 @@ innerView file =
 
 
 fuelRequired : Int -> Int
-fuelRequired x =
-    if x >= 9 then
+fuelRequired mass =
+    if mass >= 9 then
         let
             raw =
-                x // 3 - 2
+                mass // 3 - 2
         in
         raw + fuelRequired raw
 

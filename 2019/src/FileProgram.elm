@@ -1,4 +1,4 @@
-module FileProgram exposing (fileMain)
+module FileProgram exposing (fileMain, fileMain_)
 
 import Browser
 import File exposing (File)
@@ -14,11 +14,21 @@ import Task
 -- MAIN
 
 
-fileMain : (String -> Html Never) -> Program () Model Msg
-fileMain innerView =
+fileMain : inner -> (inner -> String -> Html inner) -> Program () (Model inner) (Msg inner)
+fileMain innerInit innerView =
     Browser.element
-        { init = init
+        { init = init innerInit
         , view = view innerView
+        , update = update
+        , subscriptions = subscriptions
+        }
+
+
+fileMain_ : (String -> Html ()) -> Program () (Model ()) (Msg ())
+fileMain_ innerView =
+    Browser.element
+        { init = init ()
+        , view = view <| \_ -> innerView
         , update = update
         , subscriptions = subscriptions
         }
@@ -28,30 +38,32 @@ fileMain innerView =
 -- MODEL
 
 
-type alias Model =
+type alias Model inner =
     { hover : Bool
     , files : List String
+    , inner : inner
     }
 
 
-init : () -> ( Model, Cmd Msg )
-init _ =
-    ( Model False [], Cmd.none )
+init : inner -> () -> ( Model inner, Cmd (Msg inner) )
+init inner _ =
+    ( Model False [] inner, Cmd.none )
 
 
 
 -- UPDATE
 
 
-type Msg
+type Msg inner
     = Pick
     | DragEnter
     | DragLeave
     | GotFiles File (List File)
     | ReadFiles (List String)
+    | Inner inner
 
 
-update : Msg -> Model -> ( Model, Cmd Msg )
+update : Msg inner -> Model inner -> ( Model inner, Cmd (Msg inner) )
 update msg model =
     case msg of
         Pick ->
@@ -77,12 +89,15 @@ update msg model =
         ReadFiles files ->
             ( { model | files = files }, Cmd.none )
 
+        Inner inner ->
+            ( { model | inner = inner }, Cmd.none )
+
 
 
 -- SUBSCRIPTIONS
 
 
-subscriptions : Model -> Sub Msg
+subscriptions : Model inner -> Sub (Msg inner)
 subscriptions _ =
     Sub.none
 
@@ -91,11 +106,11 @@ subscriptions _ =
 -- VIEW
 
 
-view : (String -> Html Never) -> Model -> Html Msg
+view : (inner -> String -> Html inner) -> Model inner -> Html (Msg inner)
 view innerView model =
     case model.files of
         [ file ] ->
-            H.map never <| innerView file
+            H.map Inner <| innerView model.inner file
 
         _ ->
             H.div
@@ -131,7 +146,7 @@ view innerView model =
                 ]
 
 
-dropDecoder : D.Decoder Msg
+dropDecoder : D.Decoder (Msg inner)
 dropDecoder =
     D.at [ "dataTransfer", "files" ] (D.oneOrMore GotFiles File.decoder)
 
