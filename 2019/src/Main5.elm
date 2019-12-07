@@ -16,4 +16,4 @@ main =
 innerView file =
     file
         |> Intcode.runString [ 1 ]
-        |> Intcode.viewOutput
+        |> Intcode.viewOutput { showTrace = True }

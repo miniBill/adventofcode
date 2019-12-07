@@ -3,6 +3,7 @@ module Extra.Intcode5 exposing (StepOutput, run, runString, viewOutput)
 import Array exposing (Array)
 import Html exposing (Html)
 import Html.Attributes as HA
+import List.Extra as List
 
 
 type alias IP =
@@ -49,14 +50,15 @@ type alias State =
     }
 
 
+type Trace
+    = PreviousState State
+    | Log String
+
+
 type alias StepOutput a =
     { result : Result IntcodeError a
     , state : State
-    , trace :
-        List
-            { previousState : State
-            , operation : String
-            }
+    , trace : List Trace
     }
 
 
@@ -106,40 +108,73 @@ success x =
     pure <| \_ -> Ok x
 
 
+pipeline : Intcode () -> Intcode a -> Intcode a
+pipeline op x =
+    x |> andThen (\v -> op |> map (\_ -> v))
+
+
 get : IP -> Intcode Int
 get p =
-    pure <|
-        \{ memory } ->
+    pure
+        (\{ memory } ->
             Array.get p memory
                 |> Result.fromMaybe (OutOfRange p)
+        )
+        |> log (\r -> "get " ++ String.fromInt p ++ " -> " ++ String.fromInt r)
+
+
+changeState : (State -> State) -> Intcode a -> Intcode a
+changeState f x =
+    x
+        |> andThen
+            (\v state ->
+                { result = Ok v
+                , state = f state
+                , trace = [ PreviousState state ]
+                }
+            )
 
 
 set : IP -> Int -> Intcode ()
-set p v ({ memory } as state) =
-    { result = Ok ()
-    , state = { state | memory = Array.set p v memory }
-    , trace =
-        [ { previousState = state
-          , operation = "set " ++ String.fromInt p ++ " " ++ String.fromInt v
-          }
-        ]
-    }
+set p v =
+    success ()
+        |> changeState (\({ memory } as state) -> { state | memory = Array.set p v memory })
+        |> log (\_ -> "set " ++ String.fromInt p ++ " " ++ String.fromInt v)
+
+
+either : (e -> b) -> (x -> b) -> Result e x -> b
+either err ok r =
+    case r of
+        Err e ->
+            err e
+
+        Ok o ->
+            ok o
 
 
 {-| Reads the memory pointed by the current instruction pointer and then increments the instruction pointer
 -}
 pop : Intcode Int
-pop ({ ip } as state) =
-    { result =
-        Array.get ip state.memory
-            |> Result.fromMaybe (OutOfRange ip)
-    , state = { state | ip = ip + 1 }
-    , trace =
-        [ { previousState = state
-          , operation = "pop"
-          }
-        ]
-    }
+pop =
+    pure
+        (\({ ip } as state) ->
+            Array.get ip state.memory
+                |> Result.fromMaybe (OutOfRange ip)
+        )
+        |> changeState (\({ ip } as state) -> { state | ip = ip + 1 })
+        |> log (\v -> "pop -> " ++ String.fromInt v)
+
+
+log : (a -> String) -> Intcode a -> Intcode a
+log msg op =
+    op
+        |> andThen
+            (\v state ->
+                { result = Ok v
+                , state = state
+                , trace = [ Log <| msg v ]
+                }
+            )
 
 
 assertTrue : Bool -> String -> Intcode ()
@@ -155,6 +190,7 @@ assertTrue check err =
 runString : List Int -> String -> StepOutput ()
 runString input program =
     program
+        |> String.replace "\n" ""
         |> String.split ","
         |> List.filterMap String.toInt
         |> Array.fromList
@@ -172,6 +208,11 @@ run input memory =
         }
 
 
+type ParameterMode
+    = Position
+    | Immediate
+
+
 readParameter : Intcode Int
 readParameter =
     map2 Tuple.pair
@@ -180,21 +221,18 @@ readParameter =
         |> andThen
             (\( pv, mode ) ->
                 case mode of
-                    0 ->
+                    Position ->
                         get pv
 
-                    1 ->
+                    Immediate ->
                         success pv
-
-                    _ ->
-                        liftValue <| Err <| InvalidParameterMode mode
             )
 
 
 readPointer : Intcode Int
 readPointer =
     popParameterMode
-        |> andThen (\mode -> assertTrue (modBy 10 mode == 0) "Parameters that an instruction writes to will never be in immediate mode.")
+        |> andThen (\mode -> assertTrue (mode == Position) "Parameters that an instruction writes to will never be in immediate mode.")
         |> andThen (\_ -> pop)
 
 
@@ -204,6 +242,7 @@ add =
         readParameter
         readParameter
         readPointer
+        |> log (\( l, r, tp ) -> String.fromInt l ++ " + " ++ String.fromInt r ++ " = " ++ String.fromInt (l + r))
         |> andThen (\( l, r, tp ) -> set tp (l + r))
 
 
@@ -213,6 +252,7 @@ mult =
         readParameter
         readParameter
         readPointer
+        |> log (\( l, r, tp ) -> String.fromInt l ++ " * " ++ String.fromInt r ++ " = " ++ String.fromInt (l * r))
         |> andThen (\( l, r, tp ) -> set tp (l * r))
 
 
@@ -225,9 +265,8 @@ read =
                     { result = Ok head
                     , state = { state | input = tail }
                     , trace =
-                        [ { previousState = state
-                          , operation = "input"
-                          }
+                        [ Log <| "input -> " ++ String.fromInt head
+                        , PreviousState state
                         ]
                     }
 
@@ -257,30 +296,20 @@ iif c t f =
 write : Intcode ()
 write =
     let
-        rawOutput v ({ output } as state) =
-            { result = Ok ()
-            , state = { state | output = v :: output }
-            , trace =
-                [ { previousState = state
-                  , operation = "output"
-                  }
-                ]
-            }
+        rawOutput v =
+            success ()
+                |> changeState (\({ output } as state) -> { state | output = v :: output })
+                |> log (\_ -> "output " ++ String.fromInt v)
     in
     readParameter
         |> andThen rawOutput
 
 
 setIp : IP -> Intcode ()
-setIp ip state =
-    { result = Ok ()
-    , state = { state | ip = ip }
-    , trace =
-        [ { previousState = state
-          , operation = "setIp " ++ String.fromInt ip
-          }
-        ]
-    }
+setIp ip =
+    success ()
+        |> changeState (\state -> { state | ip = ip })
+        |> log (\_ -> "setIp " ++ String.fromInt ip)
 
 
 jumpIfTrue : Intcode ()
@@ -291,10 +320,13 @@ jumpIfTrue =
         |> andThen
             (\( v, ip ) ->
                 if v /= 0 then
-                    setIp ip
+                    success ()
+                        |> log (\_ -> "jump becase " ++ String.fromInt v ++ " /= 0")
+                        |> andThen (\_ -> setIp ip)
 
                 else
                     success ()
+                        |> log (\_ -> "don't jump becase 0 == 0")
             )
 
 
@@ -306,10 +338,13 @@ jumpIfFalse =
         |> andThen
             (\( v, ip ) ->
                 if v == 0 then
-                    setIp ip
+                    success ()
+                        |> log (\_ -> "jump becase 0 == 0")
+                        |> andThen (\_ -> setIp ip)
 
                 else
                     success ()
+                        |> log (\_ -> "don't jump becase " ++ String.fromInt v ++ " /= 0")
             )
 
 
@@ -319,6 +354,14 @@ lessThan =
         readParameter
         readParameter
         readParameter
+        |> log
+            (\( l, r, p ) ->
+                if l < r then
+                    String.fromInt l ++ " < " ++ String.fromInt r ++ " -> 1"
+
+                else
+                    String.fromInt l ++ " >= " ++ String.fromInt r ++ " -> 0"
+            )
         |> andThen
             (\( l, r, p ) -> set p <| iif (l < r) 1 0)
 
@@ -329,44 +372,61 @@ equals =
         readParameter
         readParameter
         readParameter
+        |> log
+            (\( l, r, p ) ->
+                if l == r then
+                    String.fromInt l ++ " == " ++ String.fromInt r ++ " -> 1"
+
+                else
+                    String.fromInt l ++ " /= " ++ String.fromInt r ++ " -> 0"
+            )
         |> andThen
             (\( l, r, p ) -> set p <| iif (l == r) 1 0)
 
 
 halt : Intcode ()
-halt state =
-    { result = Ok ()
-    , state = state
-    , trace =
-        [ { previousState = state
-          , operation = "halt"
-          }
-        ]
-    }
+halt =
+    success () |> log (\_ -> "halt")
 
 
 setParameterMode : Int -> Intcode ()
-setParameterMode mode state =
-    { result = Ok ()
-    , state = { state | parameterMode = mode }
-    , trace =
-        [ { previousState = state
-          , operation = "parameter mode: " ++ String.fromInt mode
-          }
-        ]
-    }
+setParameterMode mode =
+    success ()
+        |> changeState (\state -> { state | parameterMode = mode })
+        |> log (\_ -> "set parameter mode " ++ String.fromInt mode)
 
 
-popParameterMode : Intcode Int
+parameterModeToString : ParameterMode -> String
+parameterModeToString mode =
+    case mode of
+        Immediate ->
+            "Immediate"
+
+        Position ->
+            "Position"
+
+
+popParameterMode : Intcode ParameterMode
 popParameterMode ({ parameterMode } as state) =
-    { result = Ok (modBy 10 parameterMode)
-    , state = { state | parameterMode = parameterMode // 10 }
-    , trace =
-        [ { previousState = state
-          , operation = "pop parameter mode (" ++ String.fromInt (modBy 10 parameterMode) ++ ")"
-          }
-        ]
-    }
+    let
+        raw =
+            modBy 10 parameterMode
+
+        mode =
+            case raw of
+                0 ->
+                    Ok Position
+
+                1 ->
+                    Ok Immediate
+
+                _ ->
+                    Err <| InvalidParameterMode raw
+    in
+    liftValue mode
+        |> changeState (\s -> { s | parameterMode = parameterMode // 10 })
+        |> log (\_ -> "pop parameter mode -> " ++ String.fromInt raw ++ " = " ++ either intcodeErrorToString parameterModeToString mode)
+        |> (\f -> f state)
 
 
 runOpcode : Int -> Intcode ()
@@ -376,36 +436,38 @@ runOpcode opcode =
 
     else
         let
-            opcodeRunner =
+            ( opcodename, opcodeRunner ) =
                 case modBy 100 opcode of
                     1 ->
-                        add
+                        ( "add", add )
 
                     2 ->
-                        mult
+                        ( "mult", mult )
 
                     3 ->
-                        read
+                        ( "input", read )
 
                     4 ->
-                        write
+                        ( "output", write )
 
                     5 ->
-                        jumpIfTrue
+                        ( "jump-if-true", jumpIfTrue )
 
                     6 ->
-                        jumpIfFalse
+                        ( "jump-if-false", jumpIfFalse )
 
                     7 ->
-                        lessThan
+                        ( "less than", lessThan )
 
                     8 ->
-                        equals
+                        ( "equals", equals )
 
                     _ ->
-                        liftValue <| Err (UnknownOpcode opcode)
+                        ( "ERR", liftValue <| Err (UnknownOpcode opcode) )
         in
-        setParameterMode (opcode // 100)
+        success ()
+            |> log (\_ -> "opcode: " ++ opcodename)
+            |> andThen (\_ -> setParameterMode (opcode // 100))
             |> andThen (\_ -> opcodeRunner)
             |> andThen (\_ -> runProgram)
 
@@ -416,8 +478,8 @@ runProgram =
         |> andThen runOpcode
 
 
-viewOutput : StepOutput a -> Html msg
-viewOutput output =
+viewOutput : { showTrace : Bool } -> StepOutput a -> Html msg
+viewOutput { showTrace } output =
     let
         resultString =
             case output.result of
@@ -427,38 +489,65 @@ viewOutput output =
                 Err e ->
                     intcodeErrorToString e
 
+        memoryGroupSize =
+            4
+
         viewState state =
             state.memory
-                |> Array.map String.fromInt
+                |> Array.map (String.fromInt >> String.padLeft 4 '\u{00A0}')
                 |> Array.toList
                 |> List.indexedMap
                     (\i v ->
                         if i == state.ip then
-                            "[" ++ v ++ "]"
+                            Html.span [ HA.style "font-weight" "bold" ] [ Html.text v ]
 
                         else
-                            v
+                            Html.text v
                     )
-                |> String.join ", "
-                |> Html.text
+                |> List.greedyGroupsOf memoryGroupSize
+                |> List.indexedMap
+                    (\i gr ->
+                        Html.div
+                            [ HA.style "display" "inline-block"
+                            , HA.style "border" "1px solid black"
+                            ]
+                        <|
+                            List.intersperse (Html.text " ") <|
+                                Html.span [ HA.style "color" "gray" ]
+                                    [ Html.text <| String.padLeft 4 '0' <| String.fromInt <| i * memoryGroupSize
+                                    ]
+                                    :: gr
+                    )
+                |> Html.div []
 
-        viewTraceStep { previousState, operation } =
-            [ Html.text operation
-            , Html.br [] []
-            , viewState previousState
-            ]
+        viewTraceStep step =
+            case step of
+                Log msg ->
+                    [ Html.text msg ]
+
+                PreviousState previousState ->
+                    [ viewState previousState ]
 
         trace =
-            ([ viewState output.state ] :: List.map viewTraceStep output.trace)
-                |> List.intersperse [ Html.br [] [], Html.br [] [] ]
-                |> List.concat
+            if showTrace then
+                ([ viewState output.state ] :: List.map viewTraceStep output.trace)
+                    |> List.intersperse [ Html.br [] [], Html.br [] [] ]
+                    |> List.concat
+
+            else
+                [ Html.text "Disabled" ]
     in
-    Html.span [ HA.style "font-family" "\"Fira Code\"" ] <|
+    Html.div
+        [ HA.style "font-family" "\"Fira Code\"" ]
+    <|
         [ Html.text <| "Result: " ++ resultString
+        , Html.br [] []
         , Html.br [] []
         , Html.text <| "Output: " ++ String.join ", " (List.reverse <| List.map String.fromInt output.state.output)
         , Html.br [] []
+        , Html.br [] []
         , Html.text "Trace (newest to oldest): "
+        , Html.br [] []
         , Html.br [] []
         ]
             ++ trace

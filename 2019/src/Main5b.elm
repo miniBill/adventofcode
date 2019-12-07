@@ -13,10 +13,10 @@ import Html.Events as Html
 
 
 main =
-    FileProgram.fileMain "5" innerView
+    FileProgram.fileMain ( "5", False ) innerView
 
 
-innerView input file =
+innerView ( input, showTrace ) file =
     let
         execution =
             case String.toInt input of
@@ -26,9 +26,22 @@ innerView input file =
                 Just int ->
                     file
                         |> Intcode.runString [ int ]
-                        |> Intcode.viewOutput
+                        |> Intcode.viewOutput { showTrace = showTrace }
     in
     Html.div []
-        [ Html.input [ Html.onInput identity, Html.value input ] []
+        [ Html.text "Input: "
+        , Html.input [ Html.onInput (\i -> ( i, showTrace )), Html.value input ] []
+        , Html.br [] []
+        , Html.label []
+            [ Html.input
+                [ Html.type_ "checkbox"
+                , Html.onCheck (\s -> ( input, s ))
+                , Html.checked showTrace
+                ]
+                []
+            , Html.text "Show trace"
+            ]
+        , Html.br [] []
+        , Html.br [] []
         , execution
         ]
