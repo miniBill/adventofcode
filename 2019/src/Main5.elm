@@ -15,8 +15,5 @@ main =
 
 innerView file =
     file
-        |> String.split ","
-        |> List.filterMap String.toInt
-        |> Array.fromList
-        |> Intcode.run [ 1 ]
+        |> Intcode.runString [ 1 ]
         |> Intcode.viewOutput

@@ -1,4 +1,4 @@
-module Extra.Intcode5 exposing (StepOutput, run, viewOutput)
+module Extra.Intcode5 exposing (StepOutput, run, runString, viewOutput)
 
 import Array exposing (Array)
 import Html exposing (Html)
@@ -43,6 +43,7 @@ intcodeErrorToString e =
 type alias State =
     { memory : Memory
     , ip : IP
+    , parameterMode : Int
     , input : List Int
     , output : List Int
     }
@@ -151,110 +152,72 @@ assertTrue check err =
             Err <| AssertionFailed err
 
 
+runString : List Int -> String -> StepOutput ()
+runString input program =
+    program
+        |> String.split ","
+        |> List.filterMap String.toInt
+        |> Array.fromList
+        |> run input
+
+
 run : List Int -> Array Int -> StepOutput ()
 run input memory =
     runProgram
         { memory = memory
         , ip = 0
+        , parameterMode = 0
         , input = input
         , output = []
         }
 
 
-type ParameterMode
-    = Position
-    | Immediate
-
-
-readParameter : ParameterMode -> Intcode Int
-readParameter mode =
-    pop
+readParameter : Intcode Int
+readParameter =
+    map2 Tuple.pair
+        pop
+        popParameterMode
         |> andThen
-            (case mode of
-                Position ->
-                    get
+            (\( pv, mode ) ->
+                case mode of
+                    0 ->
+                        get pv
 
-                Immediate ->
-                    success
+                    1 ->
+                        success pv
+
+                    _ ->
+                        liftValue <| Err <| InvalidParameterMode mode
             )
 
 
-toMode : Int -> Result IntcodeError ParameterMode
-toMode m =
-    case m of
-        0 ->
-            Ok Position
-
-        1 ->
-            Ok Immediate
-
-        _ ->
-            Err <| InvalidParameterMode m
+readPointer : Intcode Int
+readPointer =
+    popParameterMode
+        |> andThen (\mode -> assertTrue (modBy 10 mode == 0) "Parameters that an instruction writes to will never be in immediate mode.")
+        |> andThen (\_ -> pop)
 
 
-getParameterModes1 : Int -> Result IntcodeError ParameterMode
-getParameterModes1 =
-    modBy 10 >> toMode
+add : Intcode ()
+add =
+    map3 (\l r tp -> ( l, r, tp ))
+        readParameter
+        readParameter
+        readPointer
+        |> andThen (\( l, r, tp ) -> set tp (l + r))
 
 
-getParameterModes2 : Int -> Result IntcodeError ( ParameterMode, ParameterMode )
-getParameterModes2 modes =
-    Result.map2 Tuple.pair
-        (getParameterModes1 modes)
-        (getParameterModes1 <| modes // 10)
+mult : Intcode ()
+mult =
+    map3 (\l r tp -> ( l, r, tp ))
+        readParameter
+        readParameter
+        readPointer
+        |> andThen (\( l, r, tp ) -> set tp (l * r))
 
 
-getParameterModes3 : Int -> Result IntcodeError ( ParameterMode, ParameterMode, ParameterMode )
-getParameterModes3 modes =
-    Result.map3 (\m1 m2 m3 -> ( m1, m2, m3 ))
-        (getParameterModes1 <| modes)
-        (getParameterModes1 <| modes // 10)
-        (getParameterModes1 <| modes // 100)
-
-
-outputParamsMustBeInPointerMode : String
-outputParamsMustBeInPointerMode =
-    "Parameters that an instruction writes to will never be in immediate mode."
-
-
-add : Int -> Intcode ()
-add modes =
-    getParameterModes3 modes
-        |> liftValue
-        |> andThen
-            (\( mode1, mode2, mode3 ) ->
-                assertTrue (mode3 == Position) outputParamsMustBeInPointerMode
-                    |> andThen
-                        (\_ ->
-                            map3 (\l r tp -> ( l, r, tp ))
-                                (readParameter mode1)
-                                (readParameter mode2)
-                                pop
-                                |> andThen (\( l, r, tp ) -> set tp (l + r))
-                        )
-            )
-
-
-mult : Int -> Intcode ()
-mult modes =
-    getParameterModes3 modes
-        |> liftValue
-        |> andThen
-            (\( mode1, mode2, mode3 ) ->
-                assertTrue (mode3 == Position) outputParamsMustBeInPointerMode
-                    |> andThen
-                        (\_ ->
-                            map3 (\l r tp -> ( l, r, tp ))
-                                (readParameter mode1)
-                                (readParameter mode2)
-                                pop
-                                |> andThen (\( l, r, tp ) -> set tp (l * r))
-                        )
-            )
-
-
-read : Int -> Intcode ()
-read modes =
+read : Intcode ()
+read =
     let
         rawInput ({ input } as state) =
             case input of
@@ -274,22 +237,25 @@ read modes =
                     , trace = []
                     }
     in
-    getParameterModes1 modes
-        |> liftValue
-        |> andThen (\mode1 -> assertTrue (mode1 == Position) outputParamsMustBeInPointerMode)
+    readPointer
         |> andThen
-            (\_ ->
-                pop
-                    |> andThen
-                        (\p ->
-                            rawInput
-                                |> andThen (set p)
-                        )
+            (\p ->
+                rawInput
+                    |> andThen (set p)
             )
 
 
-write : Int -> Intcode ()
-write modes =
+iif : Bool -> a -> a -> a
+iif c t f =
+    if c then
+        t
+
+    else
+        f
+
+
+write : Intcode ()
+write =
     let
         rawOutput v ({ output } as state) =
             { result = Ok ()
@@ -301,13 +267,70 @@ write modes =
                 ]
             }
     in
-    getParameterModes1 modes
-        |> liftValue
+    readParameter
+        |> andThen rawOutput
+
+
+setIp : IP -> Intcode ()
+setIp ip state =
+    { result = Ok ()
+    , state = { state | ip = ip }
+    , trace =
+        [ { previousState = state
+          , operation = "setIp " ++ String.fromInt ip
+          }
+        ]
+    }
+
+
+jumpIfTrue : Intcode ()
+jumpIfTrue =
+    map2 Tuple.pair
+        readParameter
+        readParameter
         |> andThen
-            (\mode1 ->
-                readParameter mode1
-                    |> andThen rawOutput
+            (\( v, ip ) ->
+                if v /= 0 then
+                    setIp ip
+
+                else
+                    success ()
             )
+
+
+jumpIfFalse : Intcode ()
+jumpIfFalse =
+    map2 Tuple.pair
+        readParameter
+        readParameter
+        |> andThen
+            (\( v, ip ) ->
+                if v == 0 then
+                    setIp ip
+
+                else
+                    success ()
+            )
+
+
+lessThan : Intcode ()
+lessThan =
+    map3 (\l r p -> ( l, r, p ))
+        readParameter
+        readParameter
+        readParameter
+        |> andThen
+            (\( l, r, p ) -> set p <| iif (l < r) 1 0)
+
+
+equals : Intcode ()
+equals =
+    map3 (\l r p -> ( l, r, p ))
+        readParameter
+        readParameter
+        readParameter
+        |> andThen
+            (\( l, r, p ) -> set p <| iif (l == r) 1 0)
 
 
 halt : Intcode ()
@@ -322,28 +345,69 @@ halt state =
     }
 
 
+setParameterMode : Int -> Intcode ()
+setParameterMode mode state =
+    { result = Ok ()
+    , state = { state | parameterMode = mode }
+    , trace =
+        [ { previousState = state
+          , operation = "parameter mode: " ++ String.fromInt mode
+          }
+        ]
+    }
+
+
+popParameterMode : Intcode Int
+popParameterMode ({ parameterMode } as state) =
+    { result = Ok (modBy 10 parameterMode)
+    , state = { state | parameterMode = parameterMode // 10 }
+    , trace =
+        [ { previousState = state
+          , operation = "pop parameter mode (" ++ String.fromInt (modBy 10 parameterMode) ++ ")"
+          }
+        ]
+    }
+
+
 runOpcode : Int -> Intcode ()
 runOpcode opcode =
     if opcode == 99 then
         halt
 
     else
-        andThen (\_ -> runProgram) <|
-            case modBy 100 opcode of
-                1 ->
-                    add (opcode // 100)
+        let
+            opcodeRunner =
+                case modBy 100 opcode of
+                    1 ->
+                        add
 
-                2 ->
-                    mult (opcode // 100)
+                    2 ->
+                        mult
 
-                3 ->
-                    read (opcode // 100)
+                    3 ->
+                        read
 
-                4 ->
-                    write (opcode // 100)
+                    4 ->
+                        write
 
-                _ ->
-                    liftValue <| Err (UnknownOpcode opcode)
+                    5 ->
+                        jumpIfTrue
+
+                    6 ->
+                        jumpIfFalse
+
+                    7 ->
+                        lessThan
+
+                    8 ->
+                        equals
+
+                    _ ->
+                        liftValue <| Err (UnknownOpcode opcode)
+        in
+        setParameterMode (opcode // 100)
+            |> andThen (\_ -> opcodeRunner)
+            |> andThen (\_ -> runProgram)
 
 
 runProgram : Intcode ()
