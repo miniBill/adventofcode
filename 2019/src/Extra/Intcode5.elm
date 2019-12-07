@@ -44,7 +44,8 @@ intcodeErrorToString e =
 type alias State =
     { memory : Memory
     , ip : IP
-    , parameterMode : Int
+    , highlight : Maybe IP
+    , parametersMode : Int
     , input : List Int
     , output : List Int
     }
@@ -129,7 +130,7 @@ changeState f x =
         |> andThen
             (\v state ->
                 { result = Ok v
-                , state = f state
+                , state = f { state | highlight = Nothing }
                 , trace = [ PreviousState state ]
                 }
             )
@@ -138,7 +139,13 @@ changeState f x =
 set : IP -> Int -> Intcode ()
 set p v =
     success ()
-        |> changeState (\({ memory } as state) -> { state | memory = Array.set p v memory })
+        |> changeState
+            (\({ memory } as state) ->
+                { state
+                    | memory = Array.set p v memory
+                    , highlight = Just p
+                }
+            )
         |> log (\_ -> "set " ++ String.fromInt p ++ " " ++ String.fromInt v)
 
 
@@ -202,7 +209,8 @@ run input memory =
     runProgram
         { memory = memory
         , ip = 0
-        , parameterMode = 0
+        , parametersMode = 0
+        , highlight = Nothing
         , input = input
         , output = []
         }
@@ -216,10 +224,10 @@ type ParameterMode
 readParameter : Intcode Int
 readParameter =
     map2 Tuple.pair
-        pop
         popParameterMode
+        pop
         |> andThen
-            (\( pv, mode ) ->
+            (\( mode, pv ) ->
                 case mode of
                     Position ->
                         get pv
@@ -392,8 +400,8 @@ halt =
 setParameterMode : Int -> Intcode ()
 setParameterMode mode =
     success ()
-        |> changeState (\state -> { state | parameterMode = mode })
-        |> log (\_ -> "set parameter mode " ++ String.fromInt mode)
+        |> changeState (\state -> { state | parametersMode = mode })
+        |> log (\_ -> "set parameters mode " ++ String.fromInt mode)
 
 
 parameterModeToString : ParameterMode -> String
@@ -407,10 +415,10 @@ parameterModeToString mode =
 
 
 popParameterMode : Intcode ParameterMode
-popParameterMode ({ parameterMode } as state) =
+popParameterMode ({ parametersMode } as state) =
     let
         raw =
-            modBy 10 parameterMode
+            modBy 10 parametersMode
 
         mode =
             case raw of
@@ -424,7 +432,7 @@ popParameterMode ({ parameterMode } as state) =
                     Err <| InvalidParameterMode raw
     in
     liftValue mode
-        |> changeState (\s -> { s | parameterMode = parameterMode // 10 })
+        |> changeState (\s -> { s | parametersMode = parametersMode // 10 })
         |> log (\_ -> "pop parameter mode -> " ++ String.fromInt raw ++ " = " ++ either intcodeErrorToString parameterModeToString mode)
         |> (\f -> f state)
 
@@ -494,15 +502,26 @@ viewOutput { showTrace } output =
 
         viewState state =
             state.memory
-                |> Array.map (String.fromInt >> String.padLeft 4 '\u{00A0}')
+                |> Array.map (String.fromInt >> String.padLeft 4 '0')
                 |> Array.toList
                 |> List.indexedMap
                     (\i v ->
-                        if i == state.ip then
-                            Html.span [ HA.style "font-weight" "bold" ] [ Html.text v ]
+                        v
+                            |> Html.text
+                            |> (\h ->
+                                    if i == state.ip then
+                                        Html.u [] [ h ]
 
-                        else
-                            Html.text v
+                                    else
+                                        h
+                               )
+                            |> (\h ->
+                                    if Just i == state.highlight then
+                                        Html.b [] [ h ]
+
+                                    else
+                                        h
+                               )
                     )
                 |> List.greedyGroupsOf memoryGroupSize
                 |> List.indexedMap
@@ -518,7 +537,21 @@ viewOutput { showTrace } output =
                                     ]
                                     :: gr
                     )
-                |> Html.div []
+                |> (\blocks ->
+                        Html.div []
+                            ([ Html.text <|
+                                "Parameters mode: "
+                                    ++ String.fromInt state.parametersMode
+                                    ++ ", Input: ["
+                                    ++ String.join ", " (List.map String.fromInt state.input)
+                                    ++ "], Output: ["
+                                    ++ String.join ", " (List.map String.fromInt state.output)
+                                    ++ "]"
+                             , Html.br [] []
+                             ]
+                                ++ blocks
+                            )
+                   )
 
         viewTraceStep step =
             case step of
