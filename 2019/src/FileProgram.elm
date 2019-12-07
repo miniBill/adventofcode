@@ -110,7 +110,11 @@ view : (inner -> String -> Html inner) -> Model inner -> Html (Msg inner)
 view innerView model =
     case model.files of
         [ file ] ->
-            H.map Inner <| innerView model.inner file
+            H.div []
+                [ H.button [ HE.onClick Pick ] [ H.text "Upload new Input" ]
+                , H.br [] []
+                , H.map Inner <| innerView model.inner file
+                ]
 
         _ ->
             H.div
