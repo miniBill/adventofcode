@@ -52,7 +52,7 @@ type alias State =
 
 
 type Trace
-    = PreviousState State
+    = NextState State
     | Log String
 
 
@@ -129,9 +129,13 @@ changeState f x =
     x
         |> andThen
             (\v state ->
+                let
+                    state_ =
+                        f { state | highlight = Nothing }
+                in
                 { result = Ok v
-                , state = f { state | highlight = Nothing }
-                , trace = [ PreviousState state ]
+                , state = state_
+                , trace = [ NextState state_ ]
                 }
             )
 
@@ -139,6 +143,7 @@ changeState f x =
 set : IP -> Int -> Intcode ()
 set p v =
     success ()
+        |> log (\_ -> "set " ++ String.fromInt p ++ " " ++ String.fromInt v)
         |> changeState
             (\({ memory } as state) ->
                 { state
@@ -146,7 +151,6 @@ set p v =
                     , highlight = Just p
                 }
             )
-        |> log (\_ -> "set " ++ String.fromInt p ++ " " ++ String.fromInt v)
 
 
 either : (e -> b) -> (x -> b) -> Result e x -> b
@@ -168,8 +172,8 @@ pop =
             Array.get ip state.memory
                 |> Result.fromMaybe (OutOfRange ip)
         )
-        |> changeState (\({ ip } as state) -> { state | ip = ip + 1 })
         |> log (\v -> "pop -> " ++ String.fromInt v)
+        |> changeState (\({ ip } as state) -> { state | ip = ip + 1 })
 
 
 log : (a -> String) -> Intcode a -> Intcode a
@@ -206,14 +210,19 @@ runString input program =
 
 run : List Int -> Array Int -> StepOutput ()
 run input memory =
-    runProgram
-        { memory = memory
-        , ip = 0
-        , parametersMode = 0
-        , highlight = Nothing
-        , input = input
-        , output = []
-        }
+    success ()
+        |> changeState identity
+        |> andThen (\_ -> runProgram)
+        |> (\f ->
+                f
+                    { memory = memory
+                    , ip = 0
+                    , parametersMode = 0
+                    , highlight = Nothing
+                    , input = input
+                    , output = []
+                    }
+           )
 
 
 type ParameterMode
@@ -264,19 +273,25 @@ mult =
         |> andThen (\( l, r, tp ) -> set tp (l * r))
 
 
+iif : Bool -> a -> a -> a
+iif c t f =
+    if c then
+        t
+
+    else
+        f
+
+
 read : Intcode ()
 read =
     let
         rawInput ({ input } as state) =
             case input of
                 head :: tail ->
-                    { result = Ok head
-                    , state = { state | input = tail }
-                    , trace =
-                        [ Log <| "input -> " ++ String.fromInt head
-                        , PreviousState state
-                        ]
-                    }
+                    success head
+                        |> log (\_ -> "input -> " ++ String.fromInt head)
+                        |> changeState (\_ -> { state | input = tail })
+                        |> (\f -> f state)
 
                 [] ->
                     { result = Err EndOfInput
@@ -292,22 +307,13 @@ read =
             )
 
 
-iif : Bool -> a -> a -> a
-iif c t f =
-    if c then
-        t
-
-    else
-        f
-
-
 write : Intcode ()
 write =
     let
         rawOutput v =
             success ()
-                |> changeState (\({ output } as state) -> { state | output = v :: output })
                 |> log (\_ -> "output " ++ String.fromInt v)
+                |> changeState (\({ output } as state) -> { state | output = v :: output })
     in
     readParameter
         |> andThen rawOutput
@@ -316,8 +322,8 @@ write =
 setIp : IP -> Intcode ()
 setIp ip =
     success ()
-        |> changeState (\state -> { state | ip = ip })
         |> log (\_ -> "setIp " ++ String.fromInt ip)
+        |> changeState (\state -> { state | ip = ip })
 
 
 jumpIfTrue : Intcode ()
@@ -361,9 +367,9 @@ lessThan =
     map3 (\l r p -> ( l, r, p ))
         readParameter
         readParameter
-        readParameter
+        readPointer
         |> log
-            (\( l, r, p ) ->
+            (\( l, r, _ ) ->
                 if l < r then
                     String.fromInt l ++ " < " ++ String.fromInt r ++ " -> 1"
 
@@ -379,9 +385,9 @@ equals =
     map3 (\l r p -> ( l, r, p ))
         readParameter
         readParameter
-        readParameter
+        readPointer
         |> log
-            (\( l, r, p ) ->
+            (\( l, r, _ ) ->
                 if l == r then
                     String.fromInt l ++ " == " ++ String.fromInt r ++ " -> 1"
 
@@ -400,8 +406,8 @@ halt =
 setParameterMode : Int -> Intcode ()
 setParameterMode mode =
     success ()
-        |> changeState (\state -> { state | parametersMode = mode })
         |> log (\_ -> "set parameters mode " ++ String.fromInt mode)
+        |> changeState (\state -> { state | parametersMode = mode })
 
 
 parameterModeToString : ParameterMode -> String
@@ -432,8 +438,8 @@ popParameterMode ({ parametersMode } as state) =
                     Err <| InvalidParameterMode raw
     in
     liftValue mode
-        |> changeState (\s -> { s | parametersMode = parametersMode // 10 })
         |> log (\_ -> "pop parameter mode -> " ++ String.fromInt raw ++ " = " ++ either intcodeErrorToString parameterModeToString mode)
+        |> changeState (\s -> { s | parametersMode = parametersMode // 10 })
         |> (\f -> f state)
 
 
@@ -558,7 +564,7 @@ viewOutput { showTrace } output =
                 Log msg ->
                     [ Html.text msg ]
 
-                PreviousState previousState ->
+                NextState previousState ->
                     [ viewState previousState ]
 
         trace =
