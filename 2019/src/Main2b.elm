@@ -1,7 +1,7 @@
 module Main2b exposing (main)
 
 import Array
-import Extra.Intcode as Intcode
+import Extra.Intcode2 as Intcode
 import FileProgram
 import Html
 

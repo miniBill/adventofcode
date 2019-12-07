@@ -1,4 +1,4 @@
-module Extra.Intcode exposing (IntcodeOutput, run, viewOutput)
+module Extra.Intcode2 exposing (IntcodeOutput, run, viewOutput)
 
 import Array exposing (Array)
 import Html exposing (Html)

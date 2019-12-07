@@ -1,7 +1,7 @@
-module Main2 exposing (main)
+module Main5 exposing (main)
 
 import Array
-import Extra.Intcode2 as Intcode
+import Extra.Intcode5 as Intcode
 import FileProgram
 
 
@@ -18,7 +18,5 @@ innerView file =
         |> String.split ","
         |> List.filterMap String.toInt
         |> Array.fromList
-        |> Array.set 1 12
-        |> Array.set 2 2
-        |> Intcode.run
+        |> Intcode.run [ 1 ]
         |> Intcode.viewOutput
