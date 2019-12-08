@@ -1,6 +1,6 @@
-module Main7 exposing (main)
+module Main7b exposing (main)
 
-import Extra.Intcode5 as Intcode
+import Extra.Intcode7 as Intcode
 import FileProgram
 import Html
 import Html.Attributes as Html
@@ -18,30 +18,6 @@ main =
 
 innerView ( input, showTrace ) file =
     let
-        directOutput a b c d e =
-            let
-                run s =
-                    file
-                        |> Intcode.runString s
-                        |> (\o -> o.state.output)
-
-                aout =
-                    run [ a, 0 ]
-
-                bout =
-                    run <| b :: aout
-
-                cout =
-                    run <| c :: bout
-
-                dout =
-                    run <| d :: cout
-
-                eout =
-                    run <| e :: dout
-            in
-            eout
-
         bestPhases =
             let
                 phases =
@@ -71,7 +47,7 @@ innerView ( input, showTrace ) file =
                                                                         , c = c
                                                                         , d = d
                                                                         , e = e
-                                                                        , output = directOutput a b c d e
+                                                                        , output = [ 100 ] --directOutput a b c d e
                                                                         }
                                                                     )
                                                         )
@@ -113,7 +89,7 @@ innerView ( input, showTrace ) file =
                                             [ Html.h1 [] [ Html.text <| "AMP " ++ label ]
                                             , Intcode.viewOutput { showTrace = showTrace } o
                                             ]
-                                        , o.state.output
+                                        , []
                                         )
                                    )
 
