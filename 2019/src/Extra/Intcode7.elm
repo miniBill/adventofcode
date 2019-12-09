@@ -1,4 +1,4 @@
-module Extra.Intcode7 exposing (run, runString, viewOutput)
+module Extra.Intcode7 exposing (InnerError, StepEffect(..), StepResult, init, initString, step, toStepResult, viewStepResult)
 
 import Array exposing (Array)
 import Html exposing (Html)
@@ -14,14 +14,14 @@ type alias Memory =
     Array Int
 
 
-type IntcodeError
+type InnerError
     = UnknownOpcode Int
     | OutOfRange Int
     | InvalidParameterMode Int
     | AssertionFailed String
 
 
-intcodeErrorToString : IntcodeError -> String
+intcodeErrorToString : InnerError -> String
 intcodeErrorToString e =
     case e of
         OutOfRange i ->
@@ -45,129 +45,108 @@ type alias State =
     }
 
 
-type Trace
-    = NextState State
-    | Log String
-
-
-type alias StepResult a =
-    { result : Result IntcodeError a
+type alias StepResult =
+    { effect : StepEffect
     , state : State
-    , trace : List Trace
+    , log : List String
     }
 
 
-type Intcode a
-    = Result (State -> StepResult a)
-    | Input (Int -> Intcode a)
-    | Output Int (Intcode a)
+type StepEffect
+    = None
+    | Error InnerError
+    | Input (Int -> StepResult)
+    | Output Int
 
 
-prependTrace : List Trace -> Intcode a -> Intcode a
-prependTrace trace x =
-    case x of
-        Result f ->
-            Result <|
-                \s ->
-                    let
-                        r =
-                            f s
-                    in
-                    { r | trace = trace ++ r.trace }
-
-        Input k ->
-            Input (prependTrace trace << k)
-
-        Output o r ->
-            Output o (prependTrace trace r)
+type alias Step =
+    State -> StepResult
 
 
-andThen : (a -> Intcode b) -> Intcode a -> Intcode b
-andThen f x =
+type alias Inner a =
+    State -> { result : Result InnerError a, state : State, log : List String }
+
+
+toStepResult : State -> StepResult
+toStepResult state =
+    { effect = None
+    , state = state
+    , log = []
+    }
+
+
+read : Step
+read state =
     let
-        cont { result, state, trace } =
-            case result of
-                Ok w ->
-                    f w
-                        |> prependTrace trace
-                        |> (\k -> k state)
-
-                Err e ->
-                    Result <|
-                        { result = Err e
-                        , state = state
-                        , trace = trace
-                        }
+        rp =
+            readPointer state
     in
-    case x of
-        Result r ->
-            cont r
+    case rp.result of
+        Ok p ->
+            { effect =
+                Input
+                    (\v ->
+                        { effect = None
+                        , state =
+                            { state
+                                | memory = Array.set p v rp.state.memory
+                                , highlight = Just p
+                            }
+                        , log = [ "input -> " ++ String.fromInt v ]
+                        }
+                    )
+            , state = rp.state
+            , log = rp.log
+            }
 
-        Input k ->
-            Input (\v -> k v |> andThen f)
-
-        Output o k ->
-            Output o (k |> andThen f)
-
-
-pure : (State -> Result IntcodeError a) -> Intcode a
-pure x =
-    Result <|
-        \state ->
-            { result = x state
-            , state = state
-            , trace = []
+        Err e ->
+            { effect = Error e
+            , state = rp.state
+            , log = rp.log
             }
 
 
-liftValue : Result IntcodeError a -> Intcode a
-liftValue result =
-    pure <| \_ -> result
+write : Step
+write state =
+    let
+        rp =
+            readParameter state
+    in
+    case rp.result of
+        Ok p ->
+            { effect = Output p
+            , state = rp.state
+            , log = ("output " ++ String.fromInt p) :: rp.log
+            }
+
+        Err e ->
+            { effect = Error e
+            , state = rp.state
+            , log = rp.log
+            }
 
 
-success : a -> Intcode a
-success x =
-    pure <| \_ -> Ok x
+popParameterMode : Inner ParameterMode
+popParameterMode ({ parametersMode } as state) =
+    let
+        raw =
+            modBy 10 parametersMode
 
+        mode =
+            case raw of
+                0 ->
+                    Ok Position
 
-get : IP -> Intcode Int
-get p =
-    pure
-        (\{ memory } ->
-            Array.get p memory
-                |> Result.fromMaybe (OutOfRange p)
-        )
-        |> log (\r -> "get " ++ String.fromInt p ++ " -> " ++ String.fromInt r)
+                1 ->
+                    Ok Immediate
 
-
-changeState : (State -> State) -> Intcode a -> Intcode a
-changeState f x =
-    x
-        |> andThen
-            (\v state ->
-                let
-                    state_ =
-                        f { state | highlight = Nothing }
-                in
-                Result
-                    { result = Ok v
-                    , state = state_
-                    , trace = [ NextState state_ ]
-                    }
-            )
-
-
-set : IP -> Int -> Intcode ()
-set p v =
-    success ()
-        |> log (\_ -> "set " ++ String.fromInt p ++ " " ++ String.fromInt v)
-        |> changeState
-            (\({ memory } as state) ->
-                { state
-                    | memory = Array.set p v memory
-                    , highlight = Just p
-                }
-            )
+                _ ->
+                    Err <| InvalidParameterMode raw
+    in
+    { result = mode
+    , state = { state | parametersMode = parametersMode // 10 }
+    , log = [ "pop parameter mode -> " ++ String.fromInt raw ++ " = " ++ either intcodeErrorToString parameterModeToString mode ]
+    }
 
 
 either : (e -> b) -> (x -> b) -> Result e x -> b
@@ -180,90 +159,150 @@ either err ok r =
             ok o
 
 
+get : IP -> Inner Int
+get p ({ memory } as state) =
+    let
+        result =
+            Array.get p memory |> Result.fromMaybe (OutOfRange p)
+    in
+    { result = result
+    , state = state
+    , log = [ "get " ++ String.fromInt p ++ " -> " ++ either intcodeErrorToString String.fromInt result ]
+    }
+
+
+set : IP -> Int -> Inner ()
+set p v ({ memory } as state) =
+    { result = Ok ()
+    , state =
+        { state
+            | memory = Array.set p v memory
+            , highlight = Just p
+        }
+    , log = [ "set " ++ String.fromInt p ++ " " ++ String.fromInt v ]
+    }
+
+
 {-| Reads the memory pointed by the current instruction pointer and then increments the instruction pointer
 -}
-pop : Intcode Int
-pop =
-    pure
-        (\({ ip } as state) ->
-            Array.get ip state.memory
-                |> Result.fromMaybe (OutOfRange ip)
-        )
-        |> log (\v -> "pop -> " ++ String.fromInt v)
-        |> changeState (\({ ip } as state) -> { state | ip = ip + 1 })
+pop : Inner Int
+pop ({ ip } as state) =
+    let
+        result =
+            Array.get ip state.memory |> Result.fromMaybe (OutOfRange ip)
+    in
+    { result = result
+    , log = [ "pop -> " ++ either intcodeErrorToString String.fromInt result ]
+    , state = { state | ip = ip + 1 }
+    }
 
 
-log : (a -> String) -> Intcode a -> Intcode a
-log msg op =
-    op
-        |> andThen
-            (\v state ->
-                Result
-                    { result = Ok v
-                    , state = state
-                    , trace = [ Log <| msg v ]
-                    }
-            )
-
-
-assertTrue : Bool -> String -> Intcode ()
-assertTrue check err =
-    liftValue <|
+assertTrue : Bool -> String -> Inner ()
+assertTrue check err state =
+    { result =
         if check then
             Ok ()
 
         else
             Err <| AssertionFailed err
+    , state = state
+    , log = []
+    }
 
 
-
---runString : List Int -> String -> StepOutput ()
-
-
-runString input program =
+initString : String -> State
+initString program =
     program
         |> String.replace "\n" ""
         |> String.split ","
         |> List.filterMap String.toInt
         |> Array.fromList
-        |> run input
+        |> init
 
 
+init : Array Int -> State
+init memory =
+    { memory = memory
+    , ip = 0
+    , parametersMode = 0
+    , highlight = Nothing
+    }
 
---run : List Int -> Array Int -> StepOutput ()
 
-
-run input memory =
+toStep : Inner () -> Step
+toStep inner state =
     let
-        init =
-            { memory = memory
-            , ip = 0
-            , parametersMode = 0
-            , highlight = Nothing
-            }
-
-        finish i out =
-            case out of
-                Input k ->
-                    case i of
-                        [] ->
-                            out
-
-                        head :: tail ->
-                            let
-                                rund =
-                                    k head
-                            in
-                            finish tail <| rund
-
-                _ ->
-                    out
+        r =
+            inner state
     in
-    success ()
-        |> changeState identity
-        |> andThen (\_ -> runProgram)
-        |> (\f -> f init)
-        |> finish input
+    { effect = either Error (\() -> None) r.result
+    , state = r.state
+    , log = r.log
+    }
+
+
+step : Step
+step state =
+    let
+        popped =
+            pop state
+    in
+    case popped.result of
+        Err e ->
+            { effect = Error e, state = popped.state, log = popped.log }
+
+        Ok opcode ->
+            if opcode == 99 then
+                halt popped.state
+
+            else
+                let
+                    pstate =
+                        popped.state
+
+                    modeSet =
+                        { pstate | parametersMode = opcode // 100 }
+
+                    ( opcodename, opcodeStep ) =
+                        case modBy 100 opcode of
+                            1 ->
+                                ( "add", toStep add )
+
+                            2 ->
+                                ( "mult", toStep mult )
+
+                            3 ->
+                                ( "input", read )
+
+                            4 ->
+                                ( "output", write )
+
+                            5 ->
+                                ( "jump-if-true", toStep jumpIfTrue )
+
+                            6 ->
+                                ( "jump-if-false", toStep jumpIfFalse )
+
+                            7 ->
+                                ( "less than", toStep lessThan )
+
+                            8 ->
+                                ( "equals", toStep equals )
+
+                            _ ->
+                                ( "ERR", \s -> { effect = Error (UnknownOpcode opcode), state = s, log = [] } )
+
+                    done =
+                        opcodeStep modeSet
+                in
+                { effect = done.effect
+                , log =
+                    [ "opcode: " ++ opcodename
+                    , "set parameters mode " ++ String.fromInt (opcode // 100)
+                    ]
+                        ++ done.log
+                , state = done.state
+                }
 
 
 type ParameterMode
@@ -271,7 +310,7 @@ type ParameterMode
     | Immediate
 
 
-readParameter : Intcode Int
+readParameter : Inner Int
 readParameter =
     map2 Tuple.pair
         popParameterMode
@@ -287,14 +326,14 @@ readParameter =
             )
 
 
-readPointer : Intcode Int
+readPointer : Inner Int
 readPointer =
     popParameterMode
         |> andThen (\mode -> assertTrue (mode == Position) "Parameters that an instruction writes to will never be in immediate mode.")
         |> andThen (\_ -> pop)
 
 
-add : Intcode ()
+add : Inner ()
 add =
     map3 (\l r tp -> ( l, r, tp ))
         readParameter
@@ -304,7 +343,7 @@ add =
         |> andThen (\( l, r, tp ) -> set tp (l + r))
 
 
-mult : Intcode ()
+mult : Inner ()
 mult =
     map3 (\l r tp -> ( l, r, tp ))
         readParameter
@@ -323,40 +362,15 @@ iif c t f =
         f
 
 
-read : Intcode ()
-read =
-    let
-        rawInput : Intcode Int
-        rawInput =
-            Input (\v -> success v)
-    in
-    map2 Tuple.pair
-        readPointer
-        rawInput
-        |> log (\( _, i ) -> "input -> " ++ String.fromInt i)
-        |> andThen (\( p, i ) -> set p i)
+setIp : IP -> Inner ()
+setIp ip state =
+    { result = Ok ()
+    , state = { state | ip = ip }
+    , log = [ "setIp " ++ String.fromInt ip ]
+    }
 
 
-write : Intcode ()
-write =
-    let
-        rawOutput v =
-            Output v <|
-                success ()
-    in
-    readParameter
-        |> log (\v -> "output " ++ String.fromInt v)
-        |> andThen rawOutput
-
-
-setIp : IP -> Intcode ()
-setIp ip =
-    success ()
-        |> log (\_ -> "setIp " ++ String.fromInt ip)
-        |> changeState (\state -> { state | ip = ip })
-
-
-jumpIfTrue : Intcode ()
+jumpIfTrue : Inner ()
 jumpIfTrue =
     map2 Tuple.pair
         readParameter
@@ -374,7 +388,7 @@ jumpIfTrue =
             )
 
 
-jumpIfFalse : Intcode ()
+jumpIfFalse : Inner ()
 jumpIfFalse =
     map2 Tuple.pair
         readParameter
@@ -392,7 +406,7 @@ jumpIfFalse =
             )
 
 
-lessThan : Intcode ()
+lessThan : Inner ()
 lessThan =
     map3 (\l r p -> ( l, r, p ))
         readParameter
@@ -410,7 +424,7 @@ lessThan =
             (\( l, r, p ) -> set p <| iif (l < r) 1 0)
 
 
-equals : Intcode ()
+equals : Inner ()
 equals =
     map3 (\l r p -> ( l, r, p ))
         readParameter
@@ -428,16 +442,12 @@ equals =
             (\( l, r, p ) -> set p <| iif (l == r) 1 0)
 
 
-halt : Intcode ()
-halt =
-    success () |> log (\_ -> "halt")
-
-
-setParameterMode : Int -> Intcode ()
-setParameterMode mode =
-    success ()
-        |> log (\_ -> "set parameters mode " ++ String.fromInt mode)
-        |> changeState (\state -> { state | parametersMode = mode })
+halt : Step
+halt state =
+    { effect = None
+    , state = state
+    , log = [ "halt" ]
+    }
 
 
 parameterModeToString : ParameterMode -> String
@@ -450,107 +460,28 @@ parameterModeToString mode =
             "Position"
 
 
-popParameterMode : Intcode ParameterMode
-popParameterMode =
-    Result <|
-        \({ parametersMode } as state) ->
-            let
-                raw =
-                    modBy 10 parametersMode
-
-                mode =
-                    case raw of
-                        0 ->
-                            Ok Position
-
-                        1 ->
-                            Ok Immediate
-
-                        _ ->
-                            Err <| InvalidParameterMode raw
-            in
-            liftValue mode
-                |> log (\_ -> "pop parameter mode -> " ++ String.fromInt raw ++ " = " ++ either intcodeErrorToString parameterModeToString mode)
-                |> changeState (\s -> { s | parametersMode = parametersMode // 10 })
-                |> (\f -> f state)
-
-
-runOpcode : Int -> Intcode ()
-runOpcode opcode =
-    if opcode == 99 then
-        halt
-
-    else
-        let
-            ( opcodename, opcodeRunner ) =
-                case modBy 100 opcode of
-                    1 ->
-                        ( "add", add )
-
-                    2 ->
-                        ( "mult", mult )
-
-                    3 ->
-                        ( "input", read )
-
-                    4 ->
-                        ( "output", write )
-
-                    5 ->
-                        ( "jump-if-true", jumpIfTrue )
-
-                    6 ->
-                        ( "jump-if-false", jumpIfFalse )
-
-                    7 ->
-                        ( "less than", lessThan )
-
-                    8 ->
-                        ( "equals", equals )
-
-                    _ ->
-                        ( "ERR", liftValue <| Err (UnknownOpcode opcode) )
-        in
-        success ()
-            |> log (\_ -> "opcode: " ++ opcodename)
-            |> andThen (\_ -> setParameterMode (opcode // 100))
-            |> andThen (\_ -> opcodeRunner)
-            |> andThen (\_ -> runProgram)
-
-
-runProgram : Intcode ()
-runProgram =
-    pop
-        |> andThen runOpcode
-
-
-
---viewOutput : { showTrace : Bool } -> StepOutput a -> Html msg
-
-
-viewOutput { showTrace } output =
+viewStepResult : StepResult -> Html msg
+viewStepResult result =
     let
-        resultString =
-            case output of
-                Result v ->
-                    case v.result of
-                        Ok _ ->
-                            "OK"
+        effectString =
+            case result.effect of
+                None ->
+                    "None"
 
-                        Err e ->
-                            intcodeErrorToString e
+                Error e ->
+                    intcodeErrorToString e
 
                 Input _ ->
                     "Waiting input"
 
-                Output o s ->
-                    "Output: " ++ String.fromInt o ++ ", continue"
+                Output o ->
+                    "Output: " ++ String.fromInt o
 
         memoryGroupSize =
             4
 
-        viewState state =
-            state.memory
+        viewState s =
+            s.memory
                 |> Array.map (String.fromInt >> String.padLeft 4 '0')
                 |> Array.toList
                 |> List.indexedMap
@@ -558,14 +489,14 @@ viewOutput { showTrace } output =
                         v
                             |> Html.text
                             |> (\h ->
-                                    if i == state.ip then
+                                    if i == s.ip then
                                         Html.u [] [ h ]
 
                                     else
                                         h
                                )
                             |> (\h ->
-                                    if Just i == state.highlight then
+                                    if Just i == s.highlight then
                                         Html.b [] [ h ]
 
                                     else
@@ -590,48 +521,49 @@ viewOutput { showTrace } output =
                         Html.div []
                             ([ Html.text <|
                                 "Parameters mode: "
-                                    ++ String.fromInt state.parametersMode
+                                    ++ String.fromInt s.parametersMode
                              , Html.br [] []
                              ]
                                 ++ blocks
                             )
                    )
-
-        viewTraceStep step =
-            case step of
-                Log msg ->
-                    [ Html.text msg ]
-
-                NextState previousState ->
-                    [ viewState previousState ]
-
-        trace =
-            if showTrace then
-                ([ viewState output.state ] :: List.map viewTraceStep output.trace)
-                    |> List.intersperse [ Html.br [] [], Html.br [] [] ]
-                    |> List.concat
-
-            else
-                [ Html.text "Disabled" ]
     in
     Html.div
         [ HA.style "font-family" "\"Fira Code\"" ]
     <|
-        [ Html.text <| "Result: " ++ resultString
+        [ Html.text <| "Effect: " ++ effectString
         , Html.br [] []
         , Html.br [] []
-        , Html.text "Trace (newest to oldest): "
+        , Html.text "State:"
         , Html.br [] []
         , Html.br [] []
+        , viewState result.state
         ]
-            ++ trace
+
+
+
+-- WRITE
+
+
+log : (a -> String) -> Inner a -> Inner a
+log toMsg x state =
+    let
+        r =
+            x state
+    in
+    case r.result of
+        Ok v ->
+            { r | log = r.log ++ [ toMsg v ] }
+
+        Err _ ->
+            r
 
 
 
 -- FUNCTOR
 
 
-map : (a -> b) -> Intcode a -> Intcode b
+map : (a -> b) -> Inner a -> Inner b
 map f a =
     success f
         |> andMap a
@@ -641,21 +573,54 @@ map f a =
 -- APPLICATIVE FUNCTOR
 
 
-andMap : Intcode a -> Intcode (a -> b) -> Intcode b
+success : a -> Inner a
+success x state =
+    { result = Ok x
+    , state = state
+    , log = []
+    }
+
+
+andMap : Inner a -> Inner (a -> b) -> Inner b
 andMap x f =
     f |> andThen (\f_ -> x |> andThen (\x_ -> success <| f_ x_))
 
 
-map2 : (a -> b -> c) -> Intcode a -> Intcode b -> Intcode c
+map2 : (a -> b -> c) -> Inner a -> Inner b -> Inner c
 map2 f a b =
     success f
         |> andMap a
         |> andMap b
 
 
-map3 : (a -> b -> c -> d) -> Intcode a -> Intcode b -> Intcode c -> Intcode d
+map3 : (a -> b -> c -> d) -> Inner a -> Inner b -> Inner c -> Inner d
 map3 f a b c =
     success f
         |> andMap a
         |> andMap b
         |> andMap c
+
+
+
+-- MONAD
+
+
+andThen : (a -> Inner b) -> Inner a -> Inner b
+andThen f x state =
+    let
+        x_ =
+            x state
+    in
+    case x_.result of
+        Ok v ->
+            let
+                f_ =
+                    f v x_.state
+            in
+            { f_ | log = x_.log ++ f_.log }
+
+        Err e ->
+            { result = Err e
+            , log = x_.log
+            , state = x_.state
+            }

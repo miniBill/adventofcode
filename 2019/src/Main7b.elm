@@ -1,6 +1,6 @@
 module Main7b exposing (main)
 
-import Extra.Intcode7 as Intcode
+import Extra.Intcode7 as Intcode exposing (StepResult)
 import FileProgram
 import Html
 import Html.Attributes as Html
@@ -12,8 +12,33 @@ import List.Extra as List
 -- MAIN
 
 
+type alias State =
+    { a : StepResult
+    , b : StepResult
+    , c : StepResult
+    , d : StepResult
+    , e : StepResult
+    }
+
+
+type alias Model =
+    { phases : String
+    , state : State
+    , history : List State
+    , aGotInput : Bool
+    }
+
+init : String -> State
+init = let r = IntCode.toStepResult Intcode.initString
+
 main =
-    FileProgram.fileMain ( "4,3,2,1,0", False ) innerView
+    FileProgram.fileMain
+        { phases = "4,3,2,1,0"
+        , state = init
+        , history = []
+        , aGotInput = False
+        }
+        innerView
 
 
 innerView ( input, showTrace ) file =
@@ -81,9 +106,18 @@ innerView ( input, showTrace ) file =
             case input |> String.split "," |> List.filterMap String.toInt of
                 [ a, b, c, d, e ] ->
                     let
-                        run label s =
-                            file
-                                |> Intcode.runString s
+                        amp =
+                            Intcode.runString file
+
+                        ampsChain =
+                            Intcode.chain amp <|
+                                Intcode.chain amp <|
+                                    Intcode.chain amp <|
+                                        Intcode.chain amp <|
+                                            amp
+
+                        run label =
+                            ampsChain
                                 |> (\o ->
                                         ( Html.div [ Html.style "display" "inline-block" ]
                                             [ Html.h1 [] [ Html.text <| "AMP " ++ label ]
@@ -92,21 +126,6 @@ innerView ( input, showTrace ) file =
                                         , []
                                         )
                                    )
-
-                        ( atrace, aout ) =
-                            run "a" [ a, 0 ]
-
-                        ( btrace, bout ) =
-                            run "b" <| b :: aout
-
-                        ( ctrace, cout ) =
-                            run "c" <| c :: bout
-
-                        ( dtrace, dout ) =
-                            run "d" <| d :: cout
-
-                        ( etrace, _ ) =
-                            run "e" <| e :: dout
                     in
                     Html.div []
                         [ atrace
